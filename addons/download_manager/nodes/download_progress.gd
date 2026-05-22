@@ -49,15 +49,14 @@ signal all_completed(success: bool)
 
 enum _State { IDLE, CHECKING, RESOLVING, DOWNLOADING, DONE }
 
-var _thread_pool: DownloadThreadPool
+var _executor: DownloadExecutorBase
 var _groups: Array[DownloadGroup] = []
 var _current_group_index: int = -1
 var _has_any_error: bool = false
 var _state: _State = _State.IDLE
 
-var _manifest_thread: Thread = null
 var _check_thread: Thread = null
-var _check_mutex: Mutex = Mutex.new()
+var _check_mutex: SafeMutex = SafeMutex.new()
 var _check_done: bool = false
 var _check_result: Dictionary = {}
 
@@ -91,10 +90,8 @@ func _exit_tree() -> void:
 		return
 	if _check_thread and _check_thread.is_alive():
 		_check_thread.wait_to_finish()
-	if _manifest_thread and _manifest_thread.is_alive():
-		_manifest_thread.wait_to_finish()
-	if _thread_pool:
-		_thread_pool.shutdown()
+	if _executor:
+		_executor.shutdown()
 
 #endregion
 
@@ -109,14 +106,17 @@ func check() -> void:
 		all_completed.emit(true)
 		return
 
-	_state = _State.CHECKING
-	_check_mutex.lock()
-	_check_done = false
-	_check_result = {}
-	_check_mutex.unlock()
-	_check_thread = Thread.new()
-	_check_thread.start(_do_check)
-	set_process(true)
+	if DownloadPlatform.is_web():
+		_do_check_web()
+	else:
+		_state = _State.CHECKING
+		_check_mutex.lock()
+		_check_done = false
+		_check_result = {}
+		_check_mutex.unlock()
+		_check_thread = Thread.new()
+		_check_thread.start(_do_check)
+		set_process(true)
 
 ## Begins downloading. Call directly if [member auto_start] is true,
 ## or after receiving [signal check_completed] with needs_download == true.
@@ -135,10 +135,13 @@ func start() -> void:
 	_current_group_index = -1
 	_state = _State.IDLE
 
-	if _thread_pool:
-		_thread_pool.shutdown()
-	_thread_pool = DownloadThreadPool.new()
-	_thread_pool.start(max_threads)
+	if _executor:
+		_executor.shutdown()
+	_executor = DownloadExecutorFactory.create(self, max_threads)
+	_executor.task_started.connect(_on_task_started)
+	_executor.task_progress.connect(_on_task_progress)
+	_executor.task_completed.connect(_on_task_completed)
+	_executor.manifest_resolved.connect(_on_manifest_resolved)
 
 	started.emit()
 	_advance_to_next_group()
@@ -171,6 +174,34 @@ func is_running() -> bool:
 #endregion
 
 #region Cache Check (runs in background thread)
+
+## Web-specific synchronous cache check (file I/O is safe on web).
+func _do_check_web() -> void:
+	var download_bytes: int = 0
+	var needs_download: bool = false
+
+	for group: DownloadGroup in _groups:
+		# For web, only resolve local manifests now. Remote manifests will be resolved during download.
+		if not group.is_remote_source():
+			group.resolve_tasks(base_folder)
+
+		for task: DownloadTask in group._get_tasks():
+			if not DownloadWorker._try_cache(task):
+				needs_download = true
+				download_bytes += task.expected_size
+
+	if needs_download:
+		_state = _State.IDLE
+		check_completed.emit(true, download_bytes)
+	else:
+		# All files are cached
+		for group: DownloadGroup in _groups:
+			for task: DownloadTask in group._get_tasks():
+				task.sync_exact_bytes(task.expected_size, task.expected_size)
+				task.set_status(DownloadTask.Status.DONE)
+		_state = _State.DONE
+		check_completed.emit(false, 0)
+		all_completed.emit(true)
 
 func _do_check() -> void:
 	var download_bytes: int = 0
@@ -244,13 +275,13 @@ func _advance_to_next_group() -> void:
 
 	if group.is_remote_source() and not group.is_resolved():
 		_state = _State.RESOLVING
-		_manifest_thread = Thread.new()
-		_manifest_thread.start(_resolve_remote_group.bind(group))
+		var save_dir: String = _build_save_dir(group)
+		_executor.resolve_manifest(group.source, save_dir)
 	else:
 		_enqueue_group(group)
 
-func _resolve_remote_group(group: DownloadGroup) -> void:
-	group.resolve_tasks_from_url(base_folder)
+func _build_save_dir(group: DownloadGroup) -> String:
+	return base_folder.path_join(group.subfolder) if group.subfolder != "" else base_folder
 
 func _enqueue_group(group: DownloadGroup) -> void:
 	var tasks: Array[DownloadTask]
@@ -266,20 +297,23 @@ func _enqueue_group(group: DownloadGroup) -> void:
 
 	_state = _State.DOWNLOADING
 	for task: DownloadTask in tasks:
-		_thread_pool.enqueue(task, _on_task_started, _on_task_progress, _on_task_completed)
+		_executor.enqueue(task)
 
 func _process_resolving() -> void:
-	var group: DownloadGroup = _groups[_current_group_index]
-	if not group.is_resolved():
-		return
-	if _manifest_thread:
-		_manifest_thread.wait_to_finish()
-		_manifest_thread = null
-	_enqueue_group(group)
+	# For native executor, we need to poll the manifest resolution
+	if not DownloadPlatform.is_web():
+		var native_executor: DownloadExecutorNative = _executor as DownloadExecutorNative
+		if native_executor:
+			native_executor.check_manifest()
+	# For web executor, manifest_resolved signal is emitted automatically
 
 func _process_downloading() -> void:
 	if _current_group_index < 0 or _current_group_index >= _groups.size():
 		return
+
+	# Poll progress for web executor
+	if DownloadPlatform.is_web():
+		_executor.poll_progress()
 
 	var group: DownloadGroup = _groups[_current_group_index]
 	var agg: Dictionary = group.get_aggregate_progress()
@@ -290,6 +324,11 @@ func _process_downloading() -> void:
 		var success: bool = not group.has_errors()
 		if not success:
 			_has_any_error = true
+			print("DownloadProgress: Group '%s' completed with errors" % group.get_display_name())
+			# Print individual task errors
+			for task: DownloadTask in group._get_tasks():
+				if task.get_status() == DownloadTask.Status.ERROR:
+					print("  - Task error: %s - %s" % [task.url, task.get_error()])
 		group_completed.emit(group.get_display_name(), success)
 		_advance_to_next_group()
 
@@ -300,7 +339,7 @@ func _finish_all() -> void:
 
 #endregion
 
-#region Worker Thread Callbacks
+#region Executor Callbacks
 
 func _on_task_started(task: DownloadTask) -> void:
 	file_started.emit(task.save_path.get_file())
@@ -310,6 +349,12 @@ func _on_task_progress(_task: DownloadTask) -> void:
 
 func _on_task_completed(_task: DownloadTask, _success: bool) -> void:
 	pass
+
+func _on_manifest_resolved(tasks: Array[DownloadTask]) -> void:
+	var group: DownloadGroup = _groups[_current_group_index]
+	group._set_tasks(tasks)
+	group._set_resolved(true)
+	_enqueue_group(group)
 
 #endregion
 

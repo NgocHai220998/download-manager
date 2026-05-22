@@ -1,31 +1,31 @@
-[gd_scene format=3 uid="uid://7kpy3lhmjnmi"]
+[gd_scene load_steps=4 format=3 uid="uid://7kpy3lhmjnmi"]
 
 [ext_resource type="Script" uid="uid://bgdhkmmoj1kwo" path="res://addons/download_manager/demo/demo_scene.gd" id="1_demo"]
 [ext_resource type="Script" uid="uid://bth3mjj0hk1fr" path="res://addons/download_manager/nodes/download_progress.gd" id="2_dp"]
 [ext_resource type="Script" uid="uid://cjkir1c4kclqf" path="res://addons/download_manager/nodes/download_group.gd" id="3_dg"]
 
-[node name="DemoScene" type="Node2D" unique_id=1746478702]
+[node name="DemoScene" type="Node2D"]
 script = ExtResource("1_demo")
 
-[node name="DownloadProgress" type="Node" parent="." unique_id=544165644]
+[node name="DownloadProgress" type="Node" parent="."]
 script = ExtResource("2_dp")
 base_folder = "user://downloads/assets/"
 
-[node name="SFX" type="Node" parent="DownloadProgress" unique_id=491216124]
+[node name="SFX" type="Node" parent="DownloadProgress"]
 script = ExtResource("3_dg")
 group_name = "sfx"
 subfolder = "sfx"
 source = "res://addons/download_manager/demo/manifests/sfx_manifest.json"
 
-[node name="Music" type="Node" parent="DownloadProgress" unique_id=2048101631]
+[node name="Music" type="Node" parent="DownloadProgress"]
 script = ExtResource("3_dg")
 group_name = "Music"
 subfolder = "music"
 source = "res://addons/download_manager/demo/manifests/music_manifest.json"
 
-[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=1810193712]
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
 
-[node name="VBoxContainer" type="VBoxContainer" parent="CanvasLayer" unique_id=783845713]
+[node name="VBoxContainer" type="VBoxContainer" parent="CanvasLayer"]
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
@@ -39,18 +39,18 @@ grow_horizontal = 2
 grow_vertical = 2
 theme_override_constants/separation = 10
 
-[node name="TitleLabel" type="Label" parent="CanvasLayer/VBoxContainer" unique_id=1948207054]
+[node name="TitleLabel" type="Label" parent="CanvasLayer/VBoxContainer"]
 layout_mode = 2
 text = "Waiting..."
 horizontal_alignment = 1
 
-[node name="ProgressBar" type="ProgressBar" parent="CanvasLayer/VBoxContainer" unique_id=1401007498]
+[node name="ProgressBar" type="ProgressBar" parent="CanvasLayer/VBoxContainer"]
 layout_mode = 2
 
-[node name="StatusLabel" type="Label" parent="CanvasLayer/VBoxContainer" unique_id=743548625]
+[node name="StatusLabel" type="Label" parent="CanvasLayer/VBoxContainer"]
 layout_mode = 2
 horizontal_alignment = 1
 
-[node name="UpdateButton" type="Button" parent="CanvasLayer/VBoxContainer" unique_id=1359847957]
+[node name="UpdateButton" type="Button" parent="CanvasLayer/VBoxContainer"]
 layout_mode = 2
 text = "Update Now"

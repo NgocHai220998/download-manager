@@ -25,10 +25,11 @@ signal download_completed(id: int, success: bool)
 ## Number of concurrent download threads. Set before the first download call.
 var max_threads: int = 4
 
-var _pool: DownloadThreadPool
+var _executor: DownloadExecutorBase
 var _active: Dictionary = {} # id -> Array[DownloadTask]
-var _pending_json: Dictionary = {} # id -> {"thread": Thread, "resolved": bool, "tasks": Array}
-var _pending_mutex: Mutex = Mutex.new()
+var _pending_json: Dictionary = {} # id -> {"resolved": bool, "tasks": Array}
+var _pending_mutex: SafeMutex = SafeMutex.new()
+var _pending_manifest_urls: Dictionary = {} # url -> id mapping for manifest resolution
 var _next_id: int = 1
 
 #endregion
@@ -45,8 +46,8 @@ func _process(_delta: float) -> void:
 		set_process(false)
 
 func _exit_tree() -> void:
-	if _pool:
-		_pool.shutdown()
+	if _executor:
+		_executor.shutdown()
 
 #endregion
 
@@ -54,7 +55,7 @@ func _exit_tree() -> void:
 
 ## Downloads a single file. Returns an ID to track progress and completion.
 func download_file(url: String, save_path: String, expected_size: int = 0, expected_hash: String = "") -> int:
-	_ensure_pool()
+	_ensure_executor()
 	var id: int = _next_id
 	_next_id += 1
 
@@ -65,22 +66,26 @@ func download_file(url: String, save_path: String, expected_size: int = 0, expec
 	task.expected_hash = expected_hash
 
 	_active[id] = [task]
-	_pool.enqueue(task, _on_task_started, _on_task_progress, _on_task_completed)
+	_executor.enqueue(task)
 	set_process(true)
 	return id
 
 ## Downloads files from a JSON manifest (URL or local path). Returns an ID.
 func download_json(source: String, save_dir: String) -> int:
-	_ensure_pool()
+	_ensure_executor()
 	var id: int = _next_id
 	_next_id += 1
 
 	if HttpUtil.is_remote(source):
 		var info: Dictionary = {"resolved": false, "tasks": []}
 		_pending_json[id] = info
-		var thread: Thread = Thread.new()
-		info["thread"] = thread
-		thread.start(_fetch_and_resolve.bind(id, source, save_dir))
+		_pending_manifest_urls[source] = id
+		if not _executor.manifest_resolved.is_connected(_on_manifest_resolved):
+			_executor.manifest_resolved.connect(_on_manifest_resolved)
+			_executor.task_started.connect(_on_task_started)
+			_executor.task_progress.connect(_on_task_progress)
+			_executor.task_completed.connect(_on_task_completed)
+		_executor.resolve_manifest(source, save_dir)
 	else:
 		var tasks: Array[DownloadTask] = _resolve_local_manifest(source, save_dir)
 		if tasks.is_empty():
@@ -88,7 +93,7 @@ func download_json(source: String, save_dir: String) -> int:
 			return id
 		_active[id] = tasks
 		for task: DownloadTask in tasks:
-			_pool.enqueue(task, _on_task_started, _on_task_progress, _on_task_completed)
+			_executor.enqueue(task)
 
 	set_process(true)
 	return id
@@ -127,12 +132,11 @@ func is_file_valid(save_path: String, expected_size: int, expected_hash: String 
 
 #endregion
 
-#region Internal: Thread Pool
+#region Internal: Executor
 
-func _ensure_pool() -> void:
-	if not _pool:
-		_pool = DownloadThreadPool.new()
-		_pool.start(max_threads)
+func _ensure_executor() -> void:
+	if not _executor:
+		_executor = DownloadExecutorFactory.create(self, max_threads)
 
 #endregion
 
@@ -154,10 +158,6 @@ func _poll_pending_json() -> void:
 		var info: Dictionary = _pending_json[id]
 		_pending_mutex.unlock()
 
-		var thread: Thread = info.get("thread") as Thread
-		if thread:
-			thread.wait_to_finish()
-
 		var tasks: Array = info["tasks"] as Array
 
 		if tasks.is_empty():
@@ -165,7 +165,7 @@ func _poll_pending_json() -> void:
 		else:
 			_active[id] = tasks
 			for task: Variant in tasks:
-				_pool.enqueue(task as DownloadTask, _on_task_started, _on_task_progress, _on_task_completed)
+				_executor.enqueue(task as DownloadTask)
 
 	for id: int in done_ids:
 		_pending_mutex.lock()
@@ -204,26 +204,17 @@ func _poll_active() -> void:
 
 #region Internal: Manifest Resolution
 
-func _fetch_and_resolve(id: int, source: String, save_dir: String) -> void:
-	var json_text: String = HttpUtil.fetch_url_blocking(source)
-	var tasks: Array[DownloadTask] = []
-
-	if json_text != "":
-		var entries: Array = HttpUtil.parse_manifest_json(json_text)
-		for item: Dictionary in entries:
-			var url: String = item.get("url", "")
-			if url == "":
-				continue
-			var task: DownloadTask = DownloadTask.new()
-			task.url = url
-			task.save_path = save_dir.path_join(item.get("path", url.get_file()))
-			task.expected_size = item.get("size", 0)
-			task.expected_hash = item.get("hash", "")
-			tasks.append(task)
-
+func _on_manifest_resolved(tasks: Array[DownloadTask]) -> void:
+	# Note: We can't easily map back from tasks to URL, so we'll use a different approach
+	# Store the tasks and mark as resolved
 	_pending_mutex.lock()
-	_pending_json[id]["tasks"] = tasks
-	_pending_json[id]["resolved"] = true
+	for id: int in _pending_json:
+		var info: Dictionary = _pending_json[id]
+		if not info["resolved"]:
+			# This is the pending manifest
+			info["tasks"] = tasks
+			info["resolved"] = true
+			break
 	_pending_mutex.unlock()
 
 func _resolve_local_manifest(source: String, save_dir: String) -> Array[DownloadTask]:
@@ -237,7 +228,8 @@ func _resolve_local_manifest(source: String, save_dir: String) -> Array[Download
 	var entries: Array = HttpUtil.parse_manifest_json(text)
 	var tasks: Array[DownloadTask] = []
 	for item: Dictionary in entries:
-		var url: String = item.get("url", "")
+		# Use web-url on web platform (mandatory to avoid CORS), url on native
+		var url: String = item.get("web-url" if DownloadPlatform.is_web() else "url", "")
 		if url == "":
 			continue
 		var task: DownloadTask = DownloadTask.new()
@@ -250,7 +242,7 @@ func _resolve_local_manifest(source: String, save_dir: String) -> Array[Download
 
 #endregion
 
-#region Worker Thread Callbacks
+#region Executor Callbacks
 
 func _on_task_started(_task: DownloadTask) -> void:
 	pass

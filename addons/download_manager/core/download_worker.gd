@@ -24,6 +24,7 @@ static func execute(task: DownloadTask, on_started: Callable, on_progress: Calla
 	for attempt: int in range(MAX_RETRIES):
 		last_error = _download(task, on_progress)
 		if last_error == "":
+			print('Hash: ', FileAccess.get_sha256(task.save_path))
 			if task.expected_hash != "" and FileAccess.get_sha256(task.save_path) != task.expected_hash:
 				_cleanup_partial(task.save_path)
 				_fail(task, on_progress, on_completed, "Hash mismatch after download")

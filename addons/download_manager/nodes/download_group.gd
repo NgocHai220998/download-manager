@@ -25,7 +25,7 @@ extends Node
 
 var _tasks: Array[DownloadTask] = []
 var _resolved: bool = false
-var _mutex: Mutex = Mutex.new()
+var _mutex: SafeMutex = SafeMutex.new()
 
 #endregion
 
@@ -120,6 +120,12 @@ func _get_tasks() -> Array[DownloadTask]:
 	_mutex.unlock()
 	return copy
 
+## Sets tasks externally (used by async manifest resolution).
+func _set_tasks(tasks: Array[DownloadTask]) -> void:
+	_mutex.lock()
+	_tasks = tasks
+	_mutex.unlock()
+
 func reset() -> void:
 	_mutex.lock()
 	_tasks.clear()
@@ -141,7 +147,8 @@ func _build_save_dir(base_folder: String) -> String:
 func _create_tasks(entries: Array, save_dir: String) -> void:
 	_mutex.lock()
 	for item: Dictionary in entries:
-		var url: String = item.get("url", "")
+		# Use web-url on web platform (mandatory to avoid CORS), url on native
+		var url: String = item.get("web-url" if DownloadPlatform.is_web() else "url", "")
 		if url == "":
 			continue
 		var task: DownloadTask = DownloadTask.new()

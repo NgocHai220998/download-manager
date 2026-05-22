@@ -21,7 +21,7 @@ var _downloaded_bytes: int = 0
 var _total_bytes: int = 0
 var _status: Status = Status.PENDING
 var _error_message: String = ""
-var _mutex: Mutex = Mutex.new()
+var _mutex: SafeMutex = SafeMutex.new()
 
 #endregion
 

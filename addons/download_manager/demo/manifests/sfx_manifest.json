@@ -3,6 +3,7 @@
 	"files": [
 		{
 			"url": "https://example.com/audio/sfx/sound_fx.mp3",
+			"web-url": "audio/sfx/sound_fx.mp3",
 			"path": "sound_fx.mp3",
 			"size": 141306,
 			"hash": "f36842d3e32a5ea914a40b9a7d958e500f04de2f18a63a47e7423db9004cff6c"

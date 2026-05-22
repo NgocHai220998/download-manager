@@ -3,6 +3,7 @@
 	"files": [
 		{
 			"url": "https://example.com/audio/music/grasslands.mp3",
+			"web-url": "audio/music/grasslands.mp3",
 			"path": "grasslands.mp3",
 			"size": 5938337,
 			"hash": "c39d468fa91f6255e82d398ed0cf5e17c8846d60fc977ad402b431f1d7ccb4e3"
